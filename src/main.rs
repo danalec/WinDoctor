@@ -18,14 +18,13 @@ mod hints;
 mod device_map;
 mod rules;
 mod event_xml;
-mod dllwalker;
 mod markdown;
 mod perf;
 
 static ENABLE_COLOR: OnceLock<bool> = OnceLock::new();
 
 #[derive(Clone, Copy, Debug, ValueEnum, Serialize, Deserialize)]
-enum OutputFmt { Text, Json, Yaml }
+enum OutputFmt { Text, Json }
 
 #[derive(Clone, Copy, Debug, ValueEnum, Serialize, Deserialize)]
 enum TimeZone { Local, Utc }
@@ -119,6 +118,10 @@ struct Args {
     no_emoji: bool,
     #[arg(long)]
     log_level: Option<LogLevel>,
+    #[arg(long, value_enum)]
+    log_format: Option<LogFormat>,
+    #[arg(long)]
+    log_path: Option<String>,
     #[arg(long, default_value_t = false)]
     no_open: bool,
     #[arg(long, short = 'j')]
@@ -132,29 +135,11 @@ struct Args {
     #[arg(long, default_value_t = false)]
     emit_xml: bool,
     #[arg(long)]
-    yaml_path: Option<String>,
-    #[arg(long)]
     md_path: Option<String>,
     #[arg(long)]
     md_fix_path: Option<String>,
     #[arg(long)]
     tsv_path: Option<String>,
-    #[arg(long)]
-    dll_root: Option<String>,
-    #[arg(long)]
-    dll_glob: Option<String>,
-    #[arg(long, default_value_t = false)]
-    dll_recursive: bool,
-    #[arg(long, default_value_t = 0)]
-    dll_chain_depth: usize,
-    #[arg(long, default_value_t = false)]
-    dll_only_unresolved: bool,
-    #[arg(long)]
-    dll_json_path: Option<String>,
-    #[arg(long)]
-    dll_html_path: Option<String>,
-    #[arg(long, default_value_t = false, help = "Automatic DLL diagnostics from events")]
-    dll_auto: bool,
     #[arg(long, short = 'p', num_args = 0.., value_delimiter = ',')]
     providers: Vec<String>,
     #[arg(long, short = 'x', num_args = 0.., value_delimiter = ',')]
@@ -230,6 +215,8 @@ struct Args {
     compare_ndjson: Option<Vec<String>>,
     #[arg(long, help = "Write comparison summary to JSON path")]
     compare_out: Option<String>,
+    #[arg(long, help = "Export a bundled set of outputs to this directory")]
+    export_dir: Option<String>,
 }
 
 impl Default for Args {
@@ -266,26 +253,19 @@ impl Default for Args {
             no_color: false,
             no_emoji: false,
             log_level: None,
+            log_format: None,
+            log_path: None,
             no_open: false,
             json_path: None,
             csv_path: None,
             ndjson_path: None,
             emit_eventdata: false,
             emit_xml: false,
-            yaml_path: None,
-            md_path: None,
-            md_fix_path: None,
-            tsv_path: None,
-            dll_root: None,
-            dll_glob: None,
-            dll_recursive: false,
-            dll_chain_depth: 0,
-            dll_only_unresolved: false,
-            dll_json_path: None,
-            dll_html_path: None,
-            dll_auto: false,
-            providers: vec![],
-            exclude_providers: vec![],
+        md_path: None,
+        md_fix_path: None,
+        tsv_path: None,
+        providers: vec![],
+        exclude_providers: vec![],
             max_events: 5000,
             min_level: None,
             max_level: None,
@@ -321,6 +301,7 @@ impl Default for Args {
             smart_check: false,
             compare_ndjson: None,
             compare_out: None,
+            export_dir: None,
         }
     }
 }
@@ -412,7 +393,9 @@ struct AppConfig {
     columns: Option<Vec<Column>>,
     no_truncate: Option<bool>,
     time_format: Option<String>,
-    dll_auto: Option<bool>,
+    log_format: Option<LogFormat>,
+    log_path: Option<String>,
+    export_dir: Option<String>,
 }
  
 
@@ -445,6 +428,40 @@ fn main() {
         } else if args.verbose > 0 {
             let f = if args.verbose >= 3 { log::LevelFilter::Trace } else if args.verbose == 2 { log::LevelFilter::Debug } else { log::LevelFilter::Info };
             builder.filter_level(f);
+        }
+        if let Some(fmt) = args.log_format {
+            match fmt {
+                LogFormat::Json => {
+                    builder.format(|buf, record| {
+                        use std::io::Write;
+                        let ts = chrono::Local::now().to_rfc3339();
+                        let obj = serde_json::json!({
+                            "ts": ts,
+                            "level": record.level().to_string(),
+                            "target": record.target(),
+                            "msg": record.args().to_string(),
+                        });
+                        writeln!(buf, "{}", obj)
+                    });
+                }
+                LogFormat::Text => {
+                    builder.format(|buf, record| {
+                        use std::io::Write;
+                        let ts = chrono::Local::now().format("%H:%M:%S");
+                        writeln!(buf, "[{:<5} {}] {}", record.level(), ts, record.args())
+                    });
+                }
+            }
+        }
+        if let Some(path) = args.log_path.as_ref() {
+            match std::fs::File::create(path) {
+                Ok(f) => {
+                    builder.target(env_logger::Target::Pipe(Box::new(f)));
+                }
+                Err(e) => {
+                    eprintln!("Failed to open log file {}: {}", path, e);
+                }
+            }
         }
         builder.init();
     }
@@ -665,7 +682,7 @@ fn main() {
     let sample_n = args.sample_count.unwrap_or(args.top);
     let perf_counters = if args.collect_perf { Some(crate::perf::collect_perf_counters()) } else { None };
     let smart_pred = if args.smart_check { crate::perf::smart_predict_failure() } else { None };
-    let summary = build_summary_with_files(events, patterns, args.top, sample_n, args.sort_by, args.sort_order, since, until, file_terms, file_samples, scanned_records, parsed_events, mode, rules_cfg, perf_counters, smart_pred, args.per_channel_sample_limit, args.per_provider_sample_limit, args.dll_auto, args.dll_chain_depth);
+    let summary = build_summary_with_files(events, patterns, args.top, sample_n, args.sort_by, args.sort_order, since, until, file_terms, file_samples, scanned_records, parsed_events, mode, rules_cfg, perf_counters, smart_pred, args.per_channel_sample_limit, args.per_provider_sample_limit);
     if let Some(path) = args.html.as_ref() {
         let html = crate::html::render_html(&summary, args.theme, !args.no_emoji, args.time_zone, args.time_format.as_deref());
         match std::fs::write(path, html) {
@@ -676,9 +693,7 @@ fn main() {
             Err(e) => { log::error!("HTML write failed for {}: {}", path, e); }
         }
     } else if summary.mode.is_some() {
-        let root = PathBuf::from("release");
-        let _ = std::fs::create_dir_all(&root);
-        let def = root.join("report.html");
+        let def = PathBuf::from("report.html");
         let html = crate::html::render_html(&summary, args.theme, !args.no_emoji, args.time_zone, args.time_format.as_deref());
         match std::fs::write(&def, html) {
             Ok(_) => {
@@ -706,14 +721,6 @@ fn main() {
                 }
             } else if !args.quiet { println!("{}", serde_json::to_string_pretty(&summary).unwrap()); }
         }
-        OutputFmt::Yaml => {
-            if let Some(p) = args.yaml_path.as_ref() {
-                match std::fs::write(p, serde_yaml::to_string(&summary).unwrap()) {
-                    Ok(_) => { if !args.quiet { println!("{}", paint(&format!("YAML written: {}", p), "1;36")); } },
-                    Err(e) => log::error!("YAML write failed for {}: {}", p, e),
-                }
-            } else if !args.quiet { println!("{}", serde_yaml::to_string(&summary).unwrap()); }
-        }
     }
     if let Some(p) = args.csv_path.as_ref() {
         if let Err(e) = write_csv(p, &summary, args.time_zone, args.time_format.as_deref()) { log::error!("CSV write failed for {}: {}", p, e); } else if !args.quiet { println!("{}", paint(&format!("CSV written: {}", p), "1;36")); }
@@ -739,40 +746,34 @@ fn main() {
             Err(e) => log::error!("Fix-It Markdown write failed for {}: {}", p, e),
         }
     }
-    if let Some(root) = args.dll_root.as_ref() {
-        let res = crate::dllwalker::walk(root, args.dll_glob.as_deref(), args.dll_recursive, args.dll_chain_depth);
-        println!("{}", paint("DLL Imports:", "1;36"));
-        for f in &res.files {
-            if args.dll_only_unresolved && f.unresolved_count == 0 { continue; }
-            println!("{} (imports: {}, unresolved: {})", f.path, f.imports.len(), f.unresolved_count);
-            for i in &f.imports {
-                if args.dll_only_unresolved && i.resolved.is_some() { continue; }
-                match &i.resolved {
-                    Some(r) => println!("• {} → {}", i.name, r),
-                    None => println!("• {}", paint(&format!("{} (unresolved)", i.name), "1;33")),
-                }
-                if args.dll_chain_depth > 0 && !i.deps.is_empty() {
-                    for d in &i.deps {
-                        match &d.resolved {
-                            Some(r) => println!("  ↳ {} → {}", d.name, r),
-                            None => println!("  ↳ {}", paint(&format!("{} (unresolved)", d.name), "1;33")),
-                        }
-                    }
-                }
-            }
+    if let Some(dir) = args.export_dir.as_ref() {
+        let _ = std::fs::create_dir_all(dir);
+        let ts = chrono::Local::now().format("%Y%m%d-%H%M%S").to_string();
+        let base = std::path::PathBuf::from(dir);
+        let html_path = base.join(format!("report-{}.html", ts));
+        let html = crate::html::render_html(&summary, args.theme, !args.no_emoji, args.time_zone, args.time_format.as_deref());
+        match std::fs::write(&html_path, html) {
+            Ok(_) => { if !args.no_open { open_file_default(html_path.clone()); } if !args.quiet { println!("{}", paint(&format!("HTML generated: {}", html_path.to_string_lossy()), "1;36")); } }
+            Err(e) => { log::error!("HTML write failed for {}: {}", html_path.to_string_lossy(), e); }
         }
-        if let Some(p) = args.dll_json_path.as_ref() {
-            match std::fs::write(p, serde_json::to_vec_pretty(&res).unwrap()) {
-                Ok(_) => { if !args.quiet { println!("{}", paint(&format!("DLL JSON written: {}", p), "1;36")); } }
-                Err(e) => log::error!("DLL JSON write failed for {}: {}", p, e),
-            }
+        let json_path = base.join(format!("report-{}.json", ts));
+        match std::fs::write(&json_path, serde_json::to_vec_pretty(&summary).unwrap()) {
+            Ok(_) => { if !args.quiet { println!("{}", paint(&format!("JSON written: {}", json_path.to_string_lossy()), "1;36")); } }
+            Err(e) => log::error!("JSON write failed for {}: {}", json_path.to_string_lossy(), e),
         }
-        if let Some(p) = args.dll_html_path.as_ref() {
-            let html = crate::dllwalker::render_html(&res, args.theme);
-            match std::fs::write(p, html) {
-                Ok(_) => { if !args.quiet { println!("{}", paint(&format!("DLL HTML written: {}", p), "1;36")); } }
-                Err(e) => log::error!("DLL HTML write failed for {}: {}", p, e),
-            }
+        let ndjson_path = base.join(format!("events-{}.ndjson", ts));
+        if let Err(e) = write_ndjson(&ndjson_path.to_string_lossy(), &summary, args.time_zone, args.time_format.as_deref(), args.emit_eventdata, args.emit_xml) {
+            log::error!("NDJSON write failed for {}: {}", ndjson_path.to_string_lossy(), e);
+        } else if !args.quiet { println!("{}", paint(&format!("NDJSON written: {}", ndjson_path.to_string_lossy()), "1;36")); }
+        let csv_path = base.join(format!("events-{}.csv", ts));
+        if let Err(e) = write_csv(&csv_path.to_string_lossy(), &summary, args.time_zone, args.time_format.as_deref()) { log::error!("CSV write failed for {}: {}", csv_path.to_string_lossy(), e); } else if !args.quiet { println!("{}", paint(&format!("CSV written: {}", csv_path.to_string_lossy()), "1;36")); }
+        let tsv_path = base.join(format!("events-{}.tsv", ts));
+        if let Err(e) = write_tsv(&tsv_path.to_string_lossy(), &summary, args.time_zone, args.time_format.as_deref()) { log::error!("TSV write failed for {}: {}", tsv_path.to_string_lossy(), e); } else if !args.quiet { println!("{}", paint(&format!("TSV written: {}", tsv_path.to_string_lossy()), "1;36")); }
+        let fix_md_path = base.join(format!("fix-{}.md", ts));
+        let fix_md = crate::markdown::render_fix_markdown(&summary, args.time_zone, args.time_format.as_deref());
+        match std::fs::write(&fix_md_path, fix_md.as_bytes()) {
+            Ok(_) => { if !args.quiet { println!("{}", paint(&format!("Fix-It Markdown written: {}", fix_md_path.to_string_lossy()), "1;36")); } }
+            Err(e) => log::error!("Fix-It Markdown write failed for {}: {}", fix_md_path.to_string_lossy(), e),
         }
     }
     if let Some(paths) = args.compare_ndjson.as_ref()
@@ -821,7 +822,9 @@ fn apply_config(args: &mut Args, cfg: AppConfig) {
     if args.columns.is_empty() && let Some(v) = cfg.columns { args.columns = v; }
     if let Some(v) = cfg.no_truncate { args.no_truncate = v; }
     if args.time_format.is_none() && let Some(v) = cfg.time_format { args.time_format = Some(v); }
-    if let Some(v) = cfg.dll_auto { args.dll_auto = v; }
+    if let Some(v) = cfg.log_format { args.log_format = Some(v); }
+    if args.log_path.is_none() && let Some(v) = cfg.log_path { args.log_path = Some(v); }
+    if args.export_dir.is_none() && let Some(v) = cfg.export_dir { args.export_dir = Some(v); }
     let any_time_flag = args.last10m || args.last_hour || args.last_day || args.last_week || args.hours > 0 || args.minutes > 0 || args.since.is_some() || args.until.is_some();
     if !any_time_flag {
         if let Some(v) = cfg.last_errors { args.last_errors = v; }
@@ -944,7 +947,7 @@ fn extract_attr(xml: &str, tag: &str, attr: &str) -> Option<String> {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn build_summary_with_files(events: Vec<EventItem>, patterns: Vec<String>, top: usize, sample_count: usize, sort_by: SortBy, sort_order: SortOrder, since: DateTime<Utc>, until: DateTime<Utc>, file_terms: Vec<(String, usize)>, file_samples: Vec<crate::file_scan::FileSample>, scanned_records: usize, parsed_events: usize, mode: Option<String>, rules_cfg: Option<crate::rules::RulesConfig>, perf_counters: Option<crate::perf::PerfCounters>, smart_pred: Option<bool>, per_channel_sample_limit: Option<usize>, per_provider_sample_limit: Option<usize>, dll_auto: bool, dll_chain_depth: usize) -> ReportSummary {
+fn build_summary_with_files(events: Vec<EventItem>, patterns: Vec<String>, top: usize, sample_count: usize, sort_by: SortBy, sort_order: SortOrder, since: DateTime<Utc>, until: DateTime<Utc>, file_terms: Vec<(String, usize)>, file_samples: Vec<crate::file_scan::FileSample>, scanned_records: usize, parsed_events: usize, mode: Option<String>, rules_cfg: Option<crate::rules::RulesConfig>, perf_counters: Option<crate::perf::PerfCounters>, smart_pred: Option<bool>, per_channel_sample_limit: Option<usize>, per_provider_sample_limit: Option<usize>) -> ReportSummary {
     let mut errors = 0usize;
     let mut warnings = 0usize;
     for e in &events {
@@ -1051,12 +1054,27 @@ fn build_summary_with_files(events: Vec<EventItem>, patterns: Vec<String>, top: 
         (SortBy::EventId, SortOrder::Asc) => samples.sort_by(|a, b| a.event_id.cmp(&b.event_id)),
     }
     samples.truncate(sample_count);
+    {
+        use std::collections::HashMap;
+        let mut deduped: Vec<EventItem> = Vec::new();
+        let mut seen: HashMap<(String, String), usize> = HashMap::new();
+        let max_dups = 3usize;
+        for e in samples.iter() {
+            if e.provider == "Application Error" {
+                let key = (event_cause(e), event_message(e));
+                let c = *seen.get(&key).unwrap_or(&0);
+                if c < max_dups {
+                    seen.insert(key, c + 1);
+                    deduped.push(e.clone());
+                }
+            } else {
+                deduped.push(e.clone());
+            }
+        }
+        samples = deduped;
+    }
     
     let mut novice_hints = crate::hints::generate_hints(&events);
-    if dll_auto {
-        let extra = dll_auto_hints(&events, dll_chain_depth);
-        if !extra.is_empty() { novice_hints.extend(extra); }
-    }
     if let Some(cfg) = rules_cfg.as_ref() {
         let extra = crate::rules::apply_hint_rules(&events, cfg);
         if !extra.is_empty() { novice_hints.extend(extra); }
@@ -1525,12 +1543,58 @@ fn classify_domain(provider: &str, channel: &str, event_id: u32, content: &str) 
     let p = provider.to_lowercase();
     let ch = channel.to_lowercase();
     let ct = content.to_lowercase();
-    if p.contains("disk") || p.contains("ntfs") || p.contains("storport") || ch.contains("storage") || [7u32,11,51,55,57,129,140,153,157].contains(&event_id) { return "Storage".to_string(); }
-    if p.contains("display") || p.contains("nvlddmkm") || p.contains("amdkmdag") || ch.contains("graphics") || ct.contains("tdr") { return "GPU".to_string(); }
-    if p.contains("dns") || p.contains("network") || ch.contains("network") || ct.contains("connect") { return "Network".to_string(); }
-    if p.contains("service") || ch.contains("services") { return "Services".to_string(); }
-    if p.contains("whea") || p.contains("hardware") { return "Hardware".to_string(); }
-    if p.contains("processor-power") || p.contains("kernel-processor-power") || p.contains("power") { return "CPU/Power".to_string(); }
+    // Storage / Filesystem
+    if p.contains("disk") || p.contains("ntfs") || p.contains("storport") || p.contains("volmgr") || p.contains("volsnap") || ch.contains("storage") || [7u32,11,51,55,57,129,140,153,157].contains(&event_id) {
+        return "Storage".to_string();
+    }
+    // GPU / Display
+    if p.contains("display") || p.contains("nvlddmkm") || p.contains("amdkmdag") || ch.contains("graphics") || ct.contains("tdr") {
+        return "GPU".to_string();
+    }
+    // Network / DNS
+    if p.contains("dns") || p.contains("network") || ch.contains("network") || ct.contains("connect") || ct.contains("link") || ct.contains("timeout") {
+        return "Network".to_string();
+    }
+    // Services
+    if p.contains("service") || ch.contains("services") || p.contains("service control manager") {
+        return "Services".to_string();
+    }
+    // Hardware
+    if p.contains("whea") || p.contains("hardware") {
+        return "Hardware".to_string();
+    }
+    // CPU/Power
+    if p.contains("processor-power") || p.contains("kernel-processor-power") || p.contains("power") || p.contains("kernel-power") {
+        return "CPU/Power".to_string();
+    }
+    // Permissions / DCOM
+    if ct.contains("access denied") || p.contains("distributedcom") || [10016u32,10010].contains(&event_id) {
+        return "Permissions".to_string();
+    }
+    // Time Sync
+    if p.contains("w32time") || ct.contains("time service") || ct.contains("ntp") {
+        return "Time Sync".to_string();
+    }
+    // TLS / Certificates
+    if p.contains("schannel") || ct.contains("certificate") || ct.contains("tls") || ct.contains("ssl") {
+        return "TLS/Certificates".to_string();
+    }
+    // Updates / Servicing
+    if p.contains("windowsupdateclient") || ch.contains("setup") || ct.contains("update") || ct.contains("servicing") {
+        return "Updates".to_string();
+    }
+    // USB / Device install
+    if p.contains("usbhub") || p.contains("kernel-pnp") || ct.contains("usb") || ct.contains("device") {
+        return "USB/Devices".to_string();
+    }
+    // Security / Authentication
+    if ch.contains("security") || p.contains("security") || ct.contains("logon") || ct.contains("audit failure") {
+        return "Security/Auth".to_string();
+    }
+    // Scheduler
+    if p.contains("taskscheduler") {
+        return "Scheduler".to_string();
+    }
     "General".to_string()
 }
 
@@ -1727,6 +1791,31 @@ mod tests_parse {
 }
 
 #[cfg(test)]
+mod tests_domain {
+    use super::*;
+    #[test]
+    fn classify_permissions_dcom_10016() {
+        let d = classify_domain("DistributedCOM", "System", 10016, "Access denied to CLSID");
+        assert_eq!(d, "Permissions");
+    }
+    #[test]
+    fn classify_time_sync_w32time() {
+        let d = classify_domain("Microsoft-Windows-Time-Service", "System", 0, "Time service NTP sync failed");
+        assert_eq!(d, "Time Sync");
+    }
+    #[test]
+    fn classify_tls_schannel() {
+        let d = classify_domain("Schannel", "System", 36887, "TLS handshake failure certificate");
+        assert_eq!(d, "TLS/Certificates");
+    }
+    #[test]
+    fn classify_updates_wuclient() {
+        let d = classify_domain("WindowsUpdateClient", "Setup", 0, "Update servicing failed");
+        assert_eq!(d, "Updates");
+    }
+}
+
+#[cfg(test)]
 mod tests_sampling_limits {
     use super::*;
     #[test]
@@ -1773,6 +1862,43 @@ mod tests_sampling_limits {
 }
 
 #[cfg(test)]
+mod tests_dedup_app_error {
+    use super::*;
+    #[test]
+    fn limits_application_error_duplicates() {
+        let now = Utc::now();
+        let mut events: Vec<EventItem> = Vec::new();
+        for i in 0..10 {
+            events.push(EventItem { time: now - Duration::minutes(i as i64), level: 2, channel: "Application".to_string(), provider: "Application Error".to_string(), event_id: 1000, content: "Faulting app crash X".to_string(), raw_xml: None });
+        }
+        let rep = build_summary_with_files(
+            events,
+            vec![],
+            50,
+            50,
+            SortBy::Time,
+            SortOrder::Desc,
+            now - Duration::hours(1),
+            now,
+            vec![],
+            vec![],
+            0,
+            20,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            false,
+            0,
+        );
+        let cnt = rep.samples.iter().filter(|e| e.provider == "Application Error" && event_message(e) == "Faulting app crash X" && event_cause(e) == "Application Error 1000").count();
+        assert!(cnt <= 3);
+    }
+}
+
+#[cfg(test)]
 mod tests_truncate {
     use super::*;
     #[test]
@@ -1793,31 +1919,5 @@ mod tests_truncate {
 }
 #[derive(Clone, Copy, Debug, ValueEnum, Serialize, Deserialize)]
 enum TextFormat { Lines, Table }
-fn dll_auto_hints(events: &[EventItem], chain_depth: usize) -> Vec<crate::hints::NoviceHint> {
-    let mut out: Vec<crate::hints::NoviceHint> = Vec::new();
-    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-    for e in events {
-        if e.provider == "Application Error" && e.event_id == 1000 {
-            let pairs = crate::event_xml::event_data_pairs_or_fallback(&e.content);
-            let path = pairs.get("FaultingApplicationPath").or_else(|| pairs.get("param1")).cloned().unwrap_or_default();
-            if path.is_empty() { continue; }
-            let pb = std::path::PathBuf::from(&path);
-            let file_name = pb.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
-            let dir = pb.parent().map(|p| p.to_path_buf()).unwrap_or_else(|| std::path::PathBuf::from("."));
-            let dir_s = dir.to_string_lossy().into_owned();
-            if file_name.is_empty() || dir_s.is_empty() { continue; }
-            if seen.contains(&path) { continue; }
-            seen.insert(path.clone());
-            let res = crate::dllwalker::walk(&dir_s, Some(&file_name), false, chain_depth);
-            for f in res.files {
-                if f.unresolved_count > 0 {
-                    let mut missing: Vec<String> = Vec::new();
-                    for i in f.imports.iter() { if i.resolved.is_none() && missing.len() < 3 { missing.push(i.name.clone()); } }
-                    let ev = if missing.is_empty() { None } else { Some(missing.join(", ")) };
-                    out.push(crate::hints::NoviceHint { category: "DLL".to_string(), severity: "high".to_string(), message: format!("Missing DLL dependencies for {}", f.path), evidence: ev.map(|s| vec![s]).unwrap_or_default(), count: 1, probability: 80 });
-                }
-            }
-        }
-    }
-    out
-}
+#[derive(Clone, Copy, Debug, ValueEnum, Serialize, Deserialize)]
+enum LogFormat { Text, Json }

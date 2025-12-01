@@ -1,7 +1,7 @@
 channels = ["System", "Application"]
 providers = ["Disk", "EventLog", "DistributedCOM"]
 exclude_providers = []
-output = "text" # one of: text, json, yaml
+output = "text" # one of: text, json
 text_format = "lines" # one of: lines, table
 theme = "dark" # one of: dark, light
 max_events = 5000

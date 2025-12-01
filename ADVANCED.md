@@ -19,7 +19,7 @@
 - Exclude noisy providers: `WinDoctor.exe --last_hour --exclude-providers "Security-Auditing,DistributedCOM"`
 
 ## Output and Formatting
-- `--output text|json|yaml`
+- `--output text|json`
 - `--text-format lines|table`
 - `--columns Time,Severity,Channel,Provider,Cause,Message`
 - `--msg-width`, `--cause-width`, `--no-truncate`, `--no-header`, `--summary-only`
