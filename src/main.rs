@@ -45,6 +45,8 @@ enum Theme { Dark, Light, HighContrast }
 #[derive(Clone, Copy, Debug, ValueEnum, Serialize, Deserialize)]
 enum LogLevel { Error, Warn, Info, Debug, Trace }
 #[derive(Clone, Copy, Debug, ValueEnum, Serialize, Deserialize)]
+enum Lang { En }
+#[derive(Clone, Copy, Debug, ValueEnum, Serialize, Deserialize)]
 enum Preset { Triage, Deep }
 #[derive(Clone, Copy, Debug, ValueEnum, Serialize, Deserialize)]
 enum ColumnsPreset { Minimal, Detailed }
@@ -216,6 +218,8 @@ struct Args {
     no_truncate: bool,
     #[arg(long)]
     time_format: Option<String>,
+    #[arg(long, value_enum, default_value = "en")]
+    lang: Lang,
     #[arg(long)]
     per_channel_sample_limit: Option<usize>,
     #[arg(long)]
@@ -343,6 +347,13 @@ impl Default for Args {
             redact: vec![],
             exit_code_by_risk: false,
             live_html: None,
+            print_effective_config: false,
+            fail_on_categories: vec![],
+            fail_on_providers: vec![],
+            from_ndjson: None,
+            no_wmi: false,
+            check_ndjson_schema: false,
+            lang: Lang::En,
         }
     }
 }
@@ -840,7 +851,7 @@ fn main() {
         let ts = chrono::Local::now().format("%Y%m%d-%H%M%S").to_string();
         let base = std::path::PathBuf::from(dir);
         let html_path = base.join(format!("report-{}.html", ts));
-        let html = crate::html::render_html(&summary, args.theme, !args.no_emoji, args.time_zone, args.time_format.as_deref());
+        let html = crate::html::render_html(&summary, args.theme, !args.no_emoji, args.time_zone, args.time_format.as_deref(), args.lang);
         match std::fs::write(&html_path, html) {
             Ok(_) => {
                 if !args.no_open { open_file_default(html_path.clone()); }
@@ -961,6 +972,13 @@ fn apply_config(args: &mut Args, cfg: AppConfig) {
     if let Some(v) = cfg.log_format { args.log_format = Some(v); }
     if args.log_path.is_none() && let Some(v) = cfg.log_path { args.log_path = Some(v); }
     if args.export_dir.is_none() && let Some(v) = cfg.export_dir { args.export_dir = Some(v); }
+    if let Some(v) = cfg.print_effective_config { args.print_effective_config = v; }
+    if args.fail_on_categories.is_empty() && let Some(v) = cfg.fail_on_categories { args.fail_on_categories = v; }
+    if args.fail_on_providers.is_empty() && let Some(v) = cfg.fail_on_providers { args.fail_on_providers = v; }
+    if args.from_ndjson.is_none() && let Some(v) = cfg.from_ndjson { args.from_ndjson = Some(v); }
+    if let Some(v) = cfg.no_wmi { args.no_wmi = v; }
+    if let Some(v) = cfg.check_ndjson_schema { args.check_ndjson_schema = v; }
+    if let Some(v) = cfg.lang { args.lang = v; }
     let any_time_flag = args.last10m || args.last_hour || args.last_day || args.last_week || args.hours > 0 || args.minutes > 0 || args.since.is_some() || args.until.is_some();
     if !any_time_flag {
         if let Some(v) = cfg.last_errors { args.last_errors = v; }
@@ -2196,5 +2214,12 @@ fn build_config_from_args(a: &Args) -> AppConfig {
         export_zip: Some(a.export_zip),
         redact: if a.redact.is_empty() { None } else { Some(a.redact.clone()) },
         exit_code_by_risk: Some(a.exit_code_by_risk),
+        print_effective_config: Some(a.print_effective_config),
+        fail_on_categories: if a.fail_on_categories.is_empty() { None } else { Some(a.fail_on_categories.clone()) },
+        fail_on_providers: if a.fail_on_providers.is_empty() { None } else { Some(a.fail_on_providers.clone()) },
+        from_ndjson: a.from_ndjson.clone(),
+        no_wmi: Some(a.no_wmi),
+        check_ndjson_schema: Some(a.check_ndjson_schema),
+        lang: Some(a.lang),
     }
 }

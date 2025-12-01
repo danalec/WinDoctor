@@ -280,6 +280,11 @@ pub fn generate_hints(events: &[crate::EventItem]) -> Vec<NoviceHint> {
             push_hint(&mut acc, "Storage", sev, msg, None);
         }
     }
+    let has_volsnap_abort = events.iter().any(|e| e.provider.eq_ignore_ascii_case("volsnap") && e.content.to_lowercase().contains("aborted"));
+    let has_ntfs_55 = events.iter().any(|e| e.provider.eq_ignore_ascii_case("Microsoft-Windows-Ntfs") && e.event_id == 55);
+    if has_volsnap_abort && has_ntfs_55 {
+        push_hint(&mut acc, "Storage", "high", "Shadow copies aborted and NTFS corruption detected (sequence)", None);
+    }
     let mut out: Vec<NoviceHint> = acc.into_values().collect();
     for h in &mut out {
         let base = match h.severity.as_str() { "high" => 75u8, "medium" => 50u8, _ => 25u8 };
@@ -287,11 +292,6 @@ pub fn generate_hints(events: &[crate::EventItem]) -> Vec<NoviceHint> {
         let evb = if h.evidence.is_empty() { 0 } else { 5 };
         let p = base.saturating_add(bump).saturating_add(evb);
         h.probability = p.clamp(5, 95);
-    }
-    let has_volsnap_abort = events.iter().any(|e| e.provider.eq_ignore_ascii_case("volsnap") && e.content.to_lowercase().contains("aborted"));
-    let has_ntfs_55 = events.iter().any(|e| e.provider.eq_ignore_ascii_case("Microsoft-Windows-Ntfs") && e.event_id == 55);
-    if has_volsnap_abort && has_ntfs_55 {
-        push_hint(&mut acc, "Storage", "high", "Shadow copies aborted and NTFS corruption detected (sequence)", None);
     }
     out.sort_by(|a, b| b.count.cmp(&a.count));
     out
