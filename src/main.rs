@@ -230,6 +230,18 @@ struct Args {
     compare_out: Option<String>,
     #[arg(long, help = "Export a bundled set of outputs to this directory")]
     export_dir: Option<String>,
+    #[arg(long, default_value_t = false)]
+    print_effective_config: bool,
+    #[arg(long, num_args = 0.., value_delimiter = ',', help = "Fail CI if categories present")]
+    fail_on_categories: Vec<String>,
+    #[arg(long, num_args = 0.., value_delimiter = ',', help = "Fail CI if providers present")]
+    fail_on_providers: Vec<String>,
+    #[arg(long, help = "Render report from NDJSON file (offline)")]
+    from_ndjson: Option<String>,
+    #[arg(long, default_value_t = false, help = "Disable WMI metrics collection")]
+    no_wmi: bool,
+    #[arg(long, default_value_t = false, help = "Validate NDJSON schema before reading")]
+    check_ndjson_schema: bool,
     #[arg(long, default_value_t = false, help = "Compress export_dir into a ZIP archive")]
     export_zip: bool,
     #[arg(long, num_args = 0.., value_delimiter = ',', help = "Redact keys (e.g., SID, QueryName, paths)")]
@@ -432,6 +444,13 @@ struct AppConfig {
     export_zip: Option<bool>,
     redact: Option<Vec<String>>, 
     exit_code_by_risk: Option<bool>,
+    print_effective_config: Option<bool>,
+    fail_on_categories: Option<Vec<String>>, 
+    fail_on_providers: Option<Vec<String>>, 
+    from_ndjson: Option<String>,
+    no_wmi: Option<bool>,
+    check_ndjson_schema: Option<bool>,
+    lang: Option<Lang>,
 }
  
 
@@ -733,11 +752,23 @@ fn main() {
     let any_time_flag = args.last10m || args.last_hour || args.last_day || args.last_week || args.hours > 0 || args.minutes > 0;
     let mode = if !any_time_flag { Some(format!("Last {} critical + last {} errors", args.last_criticals, args.last_errors)) } else { None };
     let sample_n = args.sample_count.unwrap_or(args.top);
-    let perf_counters = if args.collect_perf { Some(crate::perf::collect_perf_counters()) } else { None };
-    let smart_pred = if args.smart_check { crate::perf::smart_predict_failure() } else { None };
-    let summary = build_summary_with_files(events, patterns.clone(), args.top, sample_n, args.sort_by, args.sort_order, since, until, file_terms.clone(), file_samples.clone(), scanned_records, parsed_events, mode, rules_cfg.clone(), perf_counters.clone(), smart_pred, args.per_channel_sample_limit, args.per_provider_sample_limit);
+    let perf_counters = if args.collect_perf && !args.no_wmi { Some(crate::perf::collect_perf_counters()) } else { None };
+    let smart_pred = if args.smart_check && !args.no_wmi { crate::perf::smart_predict_failure() } else { None };
+    let mut summary = build_summary_with_files(events, patterns.clone(), args.top, sample_n, args.sort_by, args.sort_order, since, until, file_terms.clone(), file_samples.clone(), scanned_records, parsed_events, mode, rules_cfg.clone(), perf_counters.clone(), smart_pred, args.per_channel_sample_limit, args.per_provider_sample_limit);
+    if let Some(path) = args.from_ndjson.as_ref() {
+        if args.check_ndjson_schema && !check_ndjson_schema(path) { log::error!("NDJSON schema check failed for {}", path); std::process::exit(2); }
+        if let Some(ev) = read_ndjson_full(path) {
+            let mut items: Vec<EventItem> = Vec::new();
+            for r in ev {
+                let time = parse_system_time(&r.time.unwrap_or_else(|| Utc::now().to_rfc3339())).unwrap_or(Utc::now());
+                let severity = match r.severity.as_deref() { Some("Critical")=>1, Some("Error")=>2, Some("Warning")=>3, Some("Information")=>4, _=>0 };
+                items.push(EventItem { time, level: severity, channel: r.channel.unwrap_or_else(|| "".to_string()), provider: r.provider.unwrap_or_else(|| "".to_string()), event_id: r.event_id.unwrap_or(0), content: r.message.or(r.cause).unwrap_or_default(), raw_xml: None });
+            }
+            summary = build_summary_with_files(items, patterns.clone(), args.top, sample_n, args.sort_by, args.sort_order, since, until, vec![], vec![], scanned_records, parsed_events, Some("Offline NDJSON".to_string()), rules_cfg.clone(), None, None, args.per_channel_sample_limit, args.per_provider_sample_limit);
+        }
+    }
     if let Some(path) = args.html.as_ref() {
-        let html = crate::html::render_html(&summary, args.theme, !args.no_emoji, args.time_zone, args.time_format.as_deref());
+        let html = crate::html::render_html(&summary, args.theme, !args.no_emoji, args.time_zone, args.time_format.as_deref(), args.lang);
         match std::fs::write(path, html) {
             Ok(_) => {
                 if !args.no_open { open_file_default(PathBuf::from(path)); }
@@ -747,7 +778,7 @@ fn main() {
         }
     } else if summary.mode.is_some() {
         let def = PathBuf::from("report.html");
-        let html = crate::html::render_html(&summary, args.theme, !args.no_emoji, args.time_zone, args.time_format.as_deref());
+        let html = crate::html::render_html(&summary, args.theme, !args.no_emoji, args.time_zone, args.time_format.as_deref(), args.lang);
         match std::fs::write(&def, html) {
             Ok(_) => {
                 let s = def.to_string_lossy().into_owned();
@@ -854,6 +885,18 @@ fn main() {
         let code = match summary.risk_grade.as_str() { "Critical" => 4, "High" => 3, "Medium" => 2, _ => 0 };
         std::process::exit(code);
     }
+    if !args.fail_on_categories.is_empty() {
+        let set: Vec<String> = args.fail_on_categories.iter().map(|s| s.to_lowercase()).collect();
+        for (cat, cnt) in &summary.by_category { if *cnt > 0 && set.contains(&cat.to_lowercase()) { std::process::exit(2); } }
+    }
+    if !args.fail_on_providers.is_empty() {
+        let set: Vec<String> = args.fail_on_providers.iter().map(|s| s.to_lowercase()).collect();
+        for (prov, cnt) in &summary.by_provider { if *cnt > 0 && set.contains(&prov.to_lowercase()) { std::process::exit(2); } }
+    }
+    if args.print_effective_config {
+        let cfg = build_config_from_args(&args);
+        if let Ok(txt) = toml::to_string(&cfg) { println!("{}", txt); }
+    }
     if let Some(path) = args.save_config.as_ref() {
         let cfg = build_config_from_args(&args);
         if let Ok(txt) = toml::to_string(&cfg) {
@@ -869,7 +912,7 @@ fn main() {
             acc_events.extend(more);
             acc_events.retain(|e| e.time >= since && e.time <= Utc::now() && pass_level(&args, e.level) && pass_provider(&args, &e.provider) && pass_event_id(&args, e.event_id));
             let snap = build_summary_with_files(acc_events.clone(), patterns.clone(), args.top, sample_n, args.sort_by, args.sort_order, since, Utc::now(), file_terms.clone(), file_samples.clone(), scanned_records, parsed_events, Some("Live HTML".to_string()), rules_cfg.clone(), perf_counters.clone(), smart_pred, args.per_channel_sample_limit, args.per_provider_sample_limit);
-            let html = crate::html::render_html(&snap, args.theme, !args.no_emoji, args.time_zone, args.time_format.as_deref());
+            let html = crate::html::render_html(&snap, args.theme, !args.no_emoji, args.time_zone, args.time_format.as_deref(), args.lang);
             let ts = chrono::Local::now().format("%Y%m%d-%H%M%S").to_string();
             let path = std::path::PathBuf::from(&target_dir).join(format!("report-live-{}.html", ts));
             let _ = std::fs::write(path, html);
@@ -1466,6 +1509,7 @@ fn write_ndjson(path: &str, rep: &ReportSummary, tz: TimeZone, tfmt: Option<&str
     for e in &rep.samples {
         let ts = match (tz, tfmt) { (TimeZone::Local, Some(f)) => format!("{}", e.time.with_timezone(&Local).format(f)), (TimeZone::Utc, Some(f)) => format!("{}", e.time.format(f)), (TimeZone::Local, None) => format!("{}", e.time.with_timezone(&Local).format("%Y-%m-%d %H:%M")), (TimeZone::Utc, None) => format!("{}", e.time.format("%Y-%m-%d %H:%M")) };
         let mut obj = serde_json::json!({
+            "schema_version": 1,
             "time": ts,
             "severity": level_name(e.level),
             "channel": e.channel,
@@ -1494,6 +1538,9 @@ fn write_ndjson(path: &str, rep: &ReportSummary, tz: TimeZone, tfmt: Option<&str
 #[derive(Clone, Debug)]
 struct NdRecord { severity: String, provider: String, event_id: u32 }
 
+#[derive(Clone, Debug)]
+struct NdRecordFull { schema_version: Option<u32>, time: Option<String>, severity: Option<String>, channel: Option<String>, provider: Option<String>, event_id: Option<u32>, cause: Option<String>, message: Option<String> }
+
 fn read_ndjson(path: &str) -> Option<Vec<NdRecord>> {
     if let Ok(data) = std::fs::read_to_string(path) {
         let mut out = Vec::new();
@@ -1508,6 +1555,39 @@ fn read_ndjson(path: &str) -> Option<Vec<NdRecord>> {
         return Some(out);
     }
     None
+}
+
+fn read_ndjson_full(path: &str) -> Option<Vec<NdRecordFull>> {
+    if let Ok(data) = std::fs::read_to_string(path) {
+        let mut out = Vec::new();
+        for line in data.lines() {
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(line) {
+                let sv = v.get("schema_version").and_then(|x| x.as_u64()).map(|x| x as u32);
+                let time = v.get("time").and_then(|x| x.as_str()).map(|s| s.to_string());
+                let sev = v.get("severity").and_then(|x| x.as_str()).map(|s| s.to_string());
+                let ch = v.get("channel").and_then(|x| x.as_str()).map(|s| s.to_string());
+                let prv = v.get("provider").and_then(|x| x.as_str()).map(|s| s.to_string());
+                let eid = v.get("event_id").and_then(|x| x.as_u64()).map(|x| x as u32);
+                let cause = v.get("cause").and_then(|x| x.as_str()).map(|s| s.to_string());
+                let msg = v.get("message").and_then(|x| x.as_str()).map(|s| s.to_string());
+                out.push(NdRecordFull { schema_version: sv, time, severity: sev, channel: ch, provider: prv, event_id: eid, cause, message: msg });
+            }
+        }
+        return Some(out);
+    }
+    None
+}
+
+fn check_ndjson_schema(path: &str) -> bool {
+    if let Ok(data) = std::fs::read_to_string(path) {
+        for line in data.lines() {
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(line) {
+                if let Some(sv) = v.get("schema_version").and_then(|x| x.as_u64()) { return sv == 1; }
+                return false;
+            }
+        }
+    }
+    false
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -1681,7 +1761,12 @@ fn redact_text(s: &str) -> String {
 fn event_message_redacted(e: &EventItem) -> String { redact_text(&event_message(e)) }
 fn event_cause_redacted(e: &EventItem) -> String { redact_text(&event_cause(e)) }
 fn classify_domain(provider: &str, channel: &str, event_id: u32, content: &str) -> String {
-    let p = provider.to_lowercase();
+    let p = {
+        let mut s = provider.to_lowercase();
+        if s == "microsoft-windows-distributedcom" { s = "distributedcom".to_string(); }
+        if s == "microsoft-windows-ntfs" { s = "ntfs".to_string(); }
+        s
+    };
     let ch = channel.to_lowercase();
     let ct = content.to_lowercase();
     // Storage / Filesystem

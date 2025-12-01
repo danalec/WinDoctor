@@ -36,7 +36,10 @@ pub fn decode_event(provider: &str, event_id: u32, xml: &str) -> Option<String> 
         "DistributedCOM" => {
             let clsid = m.get("CLSID").cloned().unwrap_or_default();
             let appid = m.get("APPID").cloned().unwrap_or_default();
-            if !clsid.is_empty() || !appid.is_empty() { return Some(format!("DCOM CLSID={} APPID={}", clsid, appid)); }
+            if !clsid.is_empty() || !appid.is_empty() {
+                let fix = "https://learn.microsoft.com/en-us/troubleshoot/windows-server/application-management/event-id-10016-permissions";
+                return Some(format!("DCOM CLSID={} APPID={} (see {})", clsid, appid, fix));
+            }
             None
         }
         "Schannel" => {
@@ -49,6 +52,12 @@ pub fn decode_event(provider: &str, event_id: u32, xml: &str) -> Option<String> 
                     _ => "TLS/SSL handshake error",
                 };
                 return Some(format!("Schannel {} (ErrorCode={})", msg, code));
+            }
+            match event_id {
+                36887 => return Some("TLS fatal alert received".to_string()),
+                36874 => return Some("TLS server certificate request failed".to_string()),
+                36886 => return Some("TLS certificate chain validation failed".to_string()),
+                _ => {}
             }
             None
         }

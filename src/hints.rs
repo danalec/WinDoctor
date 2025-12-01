@@ -78,7 +78,10 @@ pub fn generate_hints(events: &[crate::EventItem]) -> Vec<NoviceHint> {
             }
             "Microsoft-Windows-GroupPolicy" => {
                 if content_lower.contains("failed") || content_lower.contains("could not apply") || content_lower.contains("processing aborted") {
-                    push_hint(&mut acc, "Policy", "medium", "Group Policy processing failure", None);
+                    let dc = m.get("DCName").cloned().unwrap_or_default();
+                    let gpo = m.get("GPOID").cloned().unwrap_or_default();
+                    let evidence = if !gpo.is_empty() { gpo } else { dc };
+                    push_hint(&mut acc, "Policy", "medium", "Group Policy processing failure", if evidence.is_empty() { None } else { Some(evidence) });
                 }
             }
             "Microsoft-Windows-WHEA-Logger" => {
@@ -224,7 +227,8 @@ pub fn generate_hints(events: &[crate::EventItem]) -> Vec<NoviceHint> {
             }
             "Netlogon" | "NETLOGON" => {
                 if content_lower.contains("domain controller") || content_lower.contains("logon failure") || content_lower.contains("could not establish a secure connection") {
-                    push_hint(&mut acc, "Network", "medium", "Domain logon or secure channel issue", None);
+                    let dc = m.get("DnsHostName").or_else(|| m.get("DCName")).cloned().unwrap_or_default();
+                    push_hint(&mut acc, "Network", "medium", "Domain logon or secure channel issue", if dc.is_empty() { None } else { Some(dc) });
                 }
             }
             "Microsoft-Windows-MemoryDiagnostics-Results" => {
@@ -283,6 +287,11 @@ pub fn generate_hints(events: &[crate::EventItem]) -> Vec<NoviceHint> {
         let evb = if h.evidence.is_empty() { 0 } else { 5 };
         let p = base.saturating_add(bump).saturating_add(evb);
         h.probability = p.clamp(5, 95);
+    }
+    let has_volsnap_abort = events.iter().any(|e| e.provider.eq_ignore_ascii_case("volsnap") && e.content.to_lowercase().contains("aborted"));
+    let has_ntfs_55 = events.iter().any(|e| e.provider.eq_ignore_ascii_case("Microsoft-Windows-Ntfs") && e.event_id == 55);
+    if has_volsnap_abort && has_ntfs_55 {
+        push_hint(&mut acc, "Storage", "high", "Shadow copies aborted and NTFS corruption detected (sequence)", None);
     }
     out.sort_by(|a, b| b.count.cmp(&a.count));
     out

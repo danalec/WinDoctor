@@ -16,6 +16,8 @@ pub struct HintRule {
     pub category: Option<String>,
     pub severity: Option<String>,          // "high" | "medium" | "low"
     pub message: String,
+    pub name: Option<String>,              // optional rule name/label
+    pub weight: Option<u8>,                // optional weight to boost probability
 }
 
 pub fn load_rules(path_opt: Option<&str>) -> Option<RulesConfig> {
@@ -47,7 +49,10 @@ pub fn apply_hint_rules(events: &[crate::EventItem], cfg: &RulesConfig) -> Vec<c
             if matched {
                 let sev = r.severity.clone().unwrap_or_else(|| "medium".to_string());
                 let cat = r.category.clone().unwrap_or_else(|| "General".to_string());
-                out.push(crate::hints::NoviceHint { category: cat, severity: sev, message: r.message.clone(), evidence: vec![], count: 1, probability: 50 });
+                let msg = if let Some(n) = r.name.as_ref() { format!("{} [{}]", r.message, n) } else { r.message.clone() };
+                let mut prob = 50u8;
+                if let Some(w) = r.weight { prob = prob.saturating_add(w); }
+                out.push(crate::hints::NoviceHint { category: cat, severity: sev, message: msg, evidence: vec![], count: 1, probability: prob });
             }
         }
     }
