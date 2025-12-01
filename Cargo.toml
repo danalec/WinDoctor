@@ -1,0 +1,39 @@
+[package]
+name = "windoctor"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT OR Apache-2.0"
+
+[[bin]]
+name = "WinDoctor"
+path = "src/main.rs"
+
+[dependencies]
+evtx = "0.8.5"
+chrono = { version = "0.4", features = ["serde"] }
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+windows-sys = { version = ">=0.59, <=0.61", features = ["Win32_System_EventLog","Win32_Foundation"] }
+globset = "0.4.14"
+regex = "1"
+walkdir = "2"
+log = "0.4"
+env_logger = "0.11"
+anyhow = "1"
+quick-xml = "0.36.2"
+clap_complete = "4"
+comfy-table = "7"
+csv = "1"
+indicatif = "0.17"
+toml = "0.8"
+is-terminal = "0.4"
+wmi = "0.18"
+serde_yaml = "0.9"
+goblin = "0.9"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1

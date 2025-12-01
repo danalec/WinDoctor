@@ -1,0 +1,48 @@
+{
+  "event_patterns": [
+    "(?i)error",
+    "(?i)fail",
+    "(?i)exception",
+    "(?i)timeout",
+    "(?i)bugcheck",
+    "(?i)crash",
+    "(?i)access denied",
+    "(?i)disk",
+    "(?i)io error",
+    "(?i)network",
+    "(?i)service",
+    "(?i)reset",
+    "(?i)retry",
+    "(?i)corrupt",
+    "(?i)degraded",
+    "(?i)unexpected",
+    "(?i)dcom",
+    "(?i)dns",
+    "(?i)w32time",
+    "(?i)group policy",
+    "(?i)usb",
+    "(?i)cdrom",
+    "(?i)netlogon"
+  ],
+  "file_patterns": [
+    "(?i)error",
+    "(?i)exception",
+    "(?i)fail"
+  ],
+  "hint_rules": [
+    {
+      "provider": "Service Control Manager",
+      "contains_any": ["failed to start", "terminated unexpectedly"],
+      "category": "Services",
+      "severity": "medium",
+      "message": "Service reported a start/termination failure"
+    },
+    {
+      "provider": "Microsoft-Windows-DNS-Client",
+      "event_id": 1014,
+      "category": "Network",
+      "severity": "medium",
+      "message": "DNS name resolution failure"
+    }
+  ]
+}
