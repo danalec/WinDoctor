@@ -22,6 +22,7 @@ mod markdown;
 mod perf;
 
 static ENABLE_COLOR: OnceLock<bool> = OnceLock::new();
+static REDACT_KEYS: OnceLock<Vec<String>> = OnceLock::new();
 
 #[derive(Clone, Copy, Debug, ValueEnum, Serialize, Deserialize)]
 enum OutputFmt { Text, Json }
@@ -39,10 +40,14 @@ enum SortOrder { Desc, Asc }
 enum Column { Time, Severity, Channel, Provider, EventId, Cause, Message }
 
 #[derive(Clone, Copy, Debug, ValueEnum, Serialize, Deserialize)]
-enum Theme { Dark, Light }
+enum Theme { Dark, Light, HighContrast }
 
 #[derive(Clone, Copy, Debug, ValueEnum, Serialize, Deserialize)]
 enum LogLevel { Error, Warn, Info, Debug, Trace }
+#[derive(Clone, Copy, Debug, ValueEnum, Serialize, Deserialize)]
+enum Preset { Triage, Deep }
+#[derive(Clone, Copy, Debug, ValueEnum, Serialize, Deserialize)]
+enum ColumnsPreset { Minimal, Detailed }
 
 #[derive(Parser, Debug)]
 #[command(
@@ -122,6 +127,8 @@ struct Args {
     log_format: Option<LogFormat>,
     #[arg(long)]
     log_path: Option<String>,
+    #[arg(long, value_enum)]
+    preset: Option<Preset>,
     #[arg(long, default_value_t = false)]
     no_open: bool,
     #[arg(long, short = 'j')]
@@ -170,6 +177,10 @@ struct Args {
     completions_out: Option<String>,
     #[arg(long)]
     config: Option<String>,
+    #[arg(long)]
+    load_config: Option<String>,
+    #[arg(long)]
+    save_config: Option<String>,
     #[arg(long, default_value_t = false)]
     only_matched: bool,
     #[arg(long)]
@@ -199,6 +210,8 @@ struct Args {
     sort_order: SortOrder,
     #[arg(long, num_args = 0.., value_delimiter = ',')]
     columns: Vec<Column>,
+    #[arg(long, value_enum)]
+    columns_preset: Option<ColumnsPreset>,
     #[arg(long, default_value_t = false)]
     no_truncate: bool,
     #[arg(long)]
@@ -217,6 +230,14 @@ struct Args {
     compare_out: Option<String>,
     #[arg(long, help = "Export a bundled set of outputs to this directory")]
     export_dir: Option<String>,
+    #[arg(long, default_value_t = false, help = "Compress export_dir into a ZIP archive")]
+    export_zip: bool,
+    #[arg(long, num_args = 0.., value_delimiter = ',', help = "Redact keys (e.g., SID, QueryName, paths)")]
+    redact: Vec<String>,
+    #[arg(long, default_value_t = false, help = "Exit with code based on risk grade")]
+    exit_code_by_risk: bool,
+    #[arg(long, help = "Subscribe and write incremental HTML snapshots for N minutes")]
+    live_html: Option<u64>,
 }
 
 impl Default for Args {
@@ -255,17 +276,18 @@ impl Default for Args {
             log_level: None,
             log_format: None,
             log_path: None,
+            preset: None,
             no_open: false,
             json_path: None,
             csv_path: None,
             ndjson_path: None,
             emit_eventdata: false,
             emit_xml: false,
-        md_path: None,
-        md_fix_path: None,
-        tsv_path: None,
-        providers: vec![],
-        exclude_providers: vec![],
+            md_path: None,
+            md_fix_path: None,
+            tsv_path: None,
+            providers: vec![],
+            exclude_providers: vec![],
             max_events: 5000,
             min_level: None,
             max_level: None,
@@ -279,6 +301,8 @@ impl Default for Args {
             completions: None,
             completions_out: None,
             config: None,
+            load_config: None,
+            save_config: None,
             only_matched: false,
             msg_width: None,
             cause_width: None,
@@ -293,6 +317,7 @@ impl Default for Args {
             sort_by: SortBy::Time,
             sort_order: SortOrder::Desc,
             columns: vec![],
+            columns_preset: None,
             no_truncate: false,
             time_format: None,
             per_channel_sample_limit: None,
@@ -302,6 +327,10 @@ impl Default for Args {
             compare_ndjson: None,
             compare_out: None,
             export_dir: None,
+            export_zip: false,
+            redact: vec![],
+            exit_code_by_risk: false,
+            live_html: None,
         }
     }
 }
@@ -347,9 +376,10 @@ struct ReportSummary {
     perf_counters: Option<crate::perf::PerfCounters>,
     smart_failure_predicted: Option<bool>,
     risk_grade: String,
+    compare: Option<ComparisonResult>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 struct AppConfig {
     channels: Option<Vec<String>>,
     patterns: Option<Vec<String>>,
@@ -390,17 +420,24 @@ struct AppConfig {
     emit_xml: Option<bool>,
     force_color: Option<bool>,
     time_zone: Option<TimeZone>,
-    columns: Option<Vec<Column>>,
+    columns: Option<Vec<Column>>, 
+    columns_preset: Option<ColumnsPreset>,
     no_truncate: Option<bool>,
     time_format: Option<String>,
     log_format: Option<LogFormat>,
     log_path: Option<String>,
     export_dir: Option<String>,
+    preset: Option<Preset>,
+    // duplicate removed
+    export_zip: Option<bool>,
+    redact: Option<Vec<String>>, 
+    exit_code_by_risk: Option<bool>,
 }
  
 
 fn main() {
     let mut args = Args::parse();
+    if let Some(lc) = args.load_config.as_ref() { args.config = Some(lc.clone()); }
     if let Some(sh) = args.completions {
         let mut cmd = Args::command();
         if let Some(path) = args.completions_out.as_ref() {
@@ -464,6 +501,22 @@ fn main() {
             }
         }
         builder.init();
+    }
+    let _ = REDACT_KEYS.set(args.redact.clone());
+    if let Some(p) = args.preset {
+        match p {
+            Preset::Triage => {
+                if !args.last_hour { args.last_hour = true; }
+                if args.columns.is_empty() && args.columns_preset.is_none() { args.columns_preset = Some(ColumnsPreset::Minimal); }
+                if args.top == 20 { args.top = 50; }
+                if !args.analysis_only { args.analysis_only = true; }
+            }
+            Preset::Deep => {
+                if args.hours == 0 { args.hours = 24; }
+                if !args.collect_perf { args.collect_perf = true; }
+                if !args.smart_check { args.smart_check = true; }
+            }
+        }
     }
     let term = std::env::var("TERM").unwrap_or_default();
     let no_color_env = std::env::var_os("NO_COLOR").is_some();
@@ -682,7 +735,7 @@ fn main() {
     let sample_n = args.sample_count.unwrap_or(args.top);
     let perf_counters = if args.collect_perf { Some(crate::perf::collect_perf_counters()) } else { None };
     let smart_pred = if args.smart_check { crate::perf::smart_predict_failure() } else { None };
-    let summary = build_summary_with_files(events, patterns, args.top, sample_n, args.sort_by, args.sort_order, since, until, file_terms, file_samples, scanned_records, parsed_events, mode, rules_cfg, perf_counters, smart_pred, args.per_channel_sample_limit, args.per_provider_sample_limit);
+    let summary = build_summary_with_files(events, patterns.clone(), args.top, sample_n, args.sort_by, args.sort_order, since, until, file_terms.clone(), file_samples.clone(), scanned_records, parsed_events, mode, rules_cfg.clone(), perf_counters.clone(), smart_pred, args.per_channel_sample_limit, args.per_provider_sample_limit);
     if let Some(path) = args.html.as_ref() {
         let html = crate::html::render_html(&summary, args.theme, !args.no_emoji, args.time_zone, args.time_format.as_deref());
         match std::fs::write(path, html) {
@@ -707,7 +760,12 @@ fn main() {
     match args.output {
         OutputFmt::Text => {
             let widths = PrintWidths { msg: args.msg_width.unwrap_or(96), cause: args.cause_width.unwrap_or(24) };
-            let cols = if args.columns.is_empty() { vec![Column::Time, Column::Severity, Column::Channel, Column::Provider, Column::Cause, Column::Message] } else { args.columns.clone() };
+            let cols = if args.columns.is_empty() {
+                match args.columns_preset.unwrap_or(ColumnsPreset::Detailed) {
+                    ColumnsPreset::Minimal => vec![Column::Time, Column::Severity, Column::Provider, Column::EventId, Column::Message],
+                    ColumnsPreset::Detailed => vec![Column::Time, Column::Severity, Column::Channel, Column::Provider, Column::EventId, Column::Cause, Column::Message],
+                }
+            } else { args.columns.clone() };
             match args.text_format {
                 TextFormat::Lines => print_text(&summary, widths, args.no_header, args.summary_only, args.analysis_only, args.time_zone, &cols, args.no_truncate, args.time_format.as_deref(), !args.no_emoji),
                 TextFormat::Table => print_text_table(&summary, widths, args.no_header, args.summary_only, args.analysis_only, args.time_zone, &cols, args.no_truncate, args.time_format.as_deref(), !args.no_emoji),
@@ -780,6 +838,10 @@ fn main() {
             Ok(_) => { if !args.quiet { println!("{}", paint(&format!("Fix-It Markdown written: {}", fix_md_path.to_string_lossy()), "1;36")); } }
             Err(e) => log::error!("Fix-It Markdown write failed for {}: {}", fix_md_path.to_string_lossy(), e),
         }
+        if args.export_zip {
+            let zip_path = base.join(format!("bundle-{}.zip", ts));
+            if let Err(e) = zip_directory(dir, &zip_path.to_string_lossy()) { log::error!("ZIP export failed for {}: {}", zip_path.to_string_lossy(), e); } else if !args.quiet { println!("{}", paint(&format!("ZIP written: {}", zip_path.to_string_lossy()), "1;36")); }
+        }
     }
     if let Some(paths) = args.compare_ndjson.as_ref()
         && paths.len() == 2
@@ -788,6 +850,31 @@ fn main() {
         if let Some(p) = args.compare_out.as_ref() { let _ = write_compare_json(p, &cmp); }
     }
     if args.warnings_as_errors && (summary.errors > 0 || summary.warnings > 0) { std::process::exit(1); }
+    if args.exit_code_by_risk {
+        let code = match summary.risk_grade.as_str() { "Critical" => 4, "High" => 3, "Medium" => 2, _ => 0 };
+        std::process::exit(code);
+    }
+    if let Some(path) = args.save_config.as_ref() {
+        let cfg = build_config_from_args(&args);
+        if let Ok(txt) = toml::to_string(&cfg) {
+            if let Err(e) = std::fs::write(path, txt) { log::error!("Save config failed for {}: {}", path, e); } else if !args.quiet { println!("{}", paint(&format!("Config saved: {}", path), "1;36")); }
+        }
+    }
+    if let Some(mins) = args.live_html {
+        let target_dir = args.export_dir.clone().unwrap_or_else(|| ".".to_string());
+        let _ = std::fs::create_dir_all(&target_dir);
+        let mut acc_events: Vec<EventItem> = Vec::new();
+        for _i in 0..mins {
+            let more = crate::windows_live::subscribe_events(&channels, 60);
+            acc_events.extend(more);
+            acc_events.retain(|e| e.time >= since && e.time <= Utc::now() && pass_level(&args, e.level) && pass_provider(&args, &e.provider) && pass_event_id(&args, e.event_id));
+            let snap = build_summary_with_files(acc_events.clone(), patterns.clone(), args.top, sample_n, args.sort_by, args.sort_order, since, Utc::now(), file_terms.clone(), file_samples.clone(), scanned_records, parsed_events, Some("Live HTML".to_string()), rules_cfg.clone(), perf_counters.clone(), smart_pred, args.per_channel_sample_limit, args.per_provider_sample_limit);
+            let html = crate::html::render_html(&snap, args.theme, !args.no_emoji, args.time_zone, args.time_format.as_deref());
+            let ts = chrono::Local::now().format("%Y%m%d-%H%M%S").to_string();
+            let path = std::path::PathBuf::from(&target_dir).join(format!("report-live-{}.html", ts));
+            let _ = std::fs::write(path, html);
+        }
+    }
 }
 
 fn apply_config(args: &mut Args, cfg: AppConfig) {
@@ -825,6 +912,7 @@ fn apply_config(args: &mut Args, cfg: AppConfig) {
     if let Some(v) = cfg.force_color { args.force_color = v; }
     if let Some(v) = cfg.time_zone { args.time_zone = v; }
     if args.columns.is_empty() && let Some(v) = cfg.columns { args.columns = v; }
+    if args.columns_preset.is_none() && let Some(v) = cfg.columns_preset { args.columns_preset = Some(v); }
     if let Some(v) = cfg.no_truncate { args.no_truncate = v; }
     if args.time_format.is_none() && let Some(v) = cfg.time_format { args.time_format = Some(v); }
     if let Some(v) = cfg.log_format { args.log_format = Some(v); }
@@ -1124,6 +1212,7 @@ fn build_summary_with_files(events: Vec<EventItem>, patterns: Vec<String>, top: 
         perf_counters,
         smart_failure_predicted: smart_pred,
         risk_grade,
+        compare: None,
     }
 }
 
@@ -1219,8 +1308,10 @@ fn print_text(rep: &ReportSummary, widths: PrintWidths, no_header: bool, summary
         let ch = if no_trunc { e.channel.clone() } else { truncate(&e.channel, 14) };
         let pr = if no_trunc { e.provider.clone() } else { truncate(&e.provider, 18) };
         let eid = e.event_id.to_string();
-        let cause = if no_trunc { event_cause(e) } else { truncate(&event_cause(e), widths.cause) };
-        let msg = if no_trunc { event_message(e) } else { truncate(&event_message(e), widths.msg) };
+        let cause_r = event_cause_redacted(e);
+        let msg_r = event_message_redacted(e);
+        let cause = if no_trunc { cause_r } else { truncate(&cause_r, widths.cause) };
+        let msg = if no_trunc { msg_r } else { truncate(&msg_r, widths.msg) };
         let line = build_line(cols, &ts, &sev_s, &ch, &pr, Some(&eid), &cause, &msg, 16, 10, 14, 18, 8, 24, 96);
         println!("{}", line);
     }
@@ -1271,8 +1362,10 @@ fn print_text_table(rep: &ReportSummary, widths: PrintWidths, no_header: bool, s
         let ch = if no_trunc { e.channel.clone() } else { truncate(&e.channel, 14) };
         let pr = if no_trunc { e.provider.clone() } else { truncate(&e.provider, 18) };
         let eid = e.event_id.to_string();
-        let cause = if no_trunc { event_cause(e) } else { truncate(&event_cause(e), widths.cause) };
-        let msg = if no_trunc { event_message(e) } else { truncate(&event_message(e), widths.msg) };
+        let cause_r = event_cause_redacted(e);
+        let msg_r = event_message_redacted(e);
+        let cause = if no_trunc { cause_r } else { truncate(&cause_r, widths.cause) };
+        let msg = if no_trunc { msg_r } else { truncate(&msg_r, widths.msg) };
         let mut row: Vec<String> = Vec::new();
         for c in cols {
             match c {
@@ -1378,12 +1471,17 @@ fn write_ndjson(path: &str, rep: &ReportSummary, tz: TimeZone, tfmt: Option<&str
             "channel": e.channel,
             "provider": e.provider,
             "event_id": e.event_id,
-            "cause": event_cause(e),
-            "message": event_message(e)
+            "cause": event_cause_redacted(e),
+            "message": event_message_redacted(e)
         });
         if emit_eventdata && let Some(xml) = e.raw_xml.as_ref()
             && let Some(map) = obj.as_object_mut() {
-            let pairs = crate::event_xml::event_data_pairs_or_fallback(xml);
+            let mut pairs = crate::event_xml::event_data_pairs_or_fallback(xml);
+            let keys = REDACT_KEYS.get().cloned().unwrap_or_default();
+            if !keys.is_empty() {
+                let lower: Vec<String> = keys.iter().map(|k| k.to_lowercase()).collect();
+                pairs.retain(|k,_| !lower.contains(&k.to_lowercase()));
+            }
             map.insert("event_data".to_string(), serde_json::to_value(pairs).unwrap());
         }
         if emit_xml && let Some(xml) = e.raw_xml.as_ref()
@@ -1412,7 +1510,7 @@ fn read_ndjson(path: &str) -> Option<Vec<NdRecord>> {
     None
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 struct ComparisonResult {
     delta_errors: isize,
     delta_warnings: isize,
@@ -1477,6 +1575,26 @@ fn write_compare_json(path: &str, cmp: &ComparisonResult) -> Result<(), std::io:
         "new_event_ids": cmp.new_event_ids,
     });
     std::fs::write(path, serde_json::to_string_pretty(&obj).unwrap())
+}
+
+fn zip_directory(dir: &str, zip_path: &str) -> Result<(), std::io::Error> {
+    use std::fs::File;
+    use std::io::Write;
+    let file = File::create(zip_path)?;
+    let mut zip = zip::ZipWriter::new(file);
+    let options = zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+    for de in walkdir::WalkDir::new(dir).into_iter().filter_map(Result::ok) {
+        let p = de.path();
+        if p.is_file() {
+            let rel = p.strip_prefix(dir).unwrap_or(p);
+            let rel_s = rel.to_string_lossy().replace('\\', "/");
+            zip.start_file(rel_s, options)?;
+            let data = std::fs::read(p)?;
+            zip.write_all(&data)?;
+        }
+    }
+    zip.finish()?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1544,6 +1662,24 @@ fn event_cause(e: &EventItem) -> String {
 }
 
 fn event_message(e: &EventItem) -> String { e.content.replace('\n', " ") }
+fn redact_text(s: &str) -> String {
+    let keys = REDACT_KEYS.get().cloned().unwrap_or_default();
+    if keys.is_empty() { return s.to_string(); }
+    let mut out = s.to_string();
+    let lower: Vec<String> = keys.iter().map(|k| k.to_lowercase()).collect();
+    if lower.iter().any(|k| k == "sid") {
+        if let Ok(re) = regex::Regex::new(r"S-\d-\d-(?:\d+-)+\d+") { out = re.replace_all(&out, "SID-REDACTED").to_string(); }
+    }
+    if lower.iter().any(|k| k == "queryname" || k == "domain") {
+        if let Ok(re) = regex::Regex::new(r"\b([a-zA-Z0-9_-]+\.)+[a-zA-Z]{2,}\b") { out = re.replace_all(&out, "DOMAIN-REDACTED").to_string(); }
+    }
+    if lower.iter().any(|k| k == "paths" || k == "path" || k == "file" ) {
+        if let Ok(re) = regex::Regex::new(r"[A-Za-z]:\\[^\s]+|\\\\\\\\[^\s]+") { out = re.replace_all(&out, "PATH-REDACTED").to_string(); }
+    }
+    out
+}
+fn event_message_redacted(e: &EventItem) -> String { redact_text(&event_message(e)) }
+fn event_cause_redacted(e: &EventItem) -> String { redact_text(&event_cause(e)) }
 fn classify_domain(provider: &str, channel: &str, event_id: u32, content: &str) -> String {
     let p = provider.to_lowercase();
     let ch = channel.to_lowercase();
@@ -1685,6 +1821,7 @@ mod tests {
             perf_counters: None,
             smart_failure_predicted: None,
             risk_grade: "Unknown".to_string(),
+            compare: None,
         };
         let p = std::env::temp_dir().join("windoctor_test.ndjson");
         write_ndjson(&p.to_string_lossy(), &rep, TimeZone::Utc, None, false, false).unwrap();
@@ -1922,3 +2059,57 @@ mod tests_truncate {
 enum TextFormat { Lines, Table }
 #[derive(Clone, Copy, Debug, ValueEnum, Serialize, Deserialize)]
 enum LogFormat { Text, Json }
+fn build_config_from_args(a: &Args) -> AppConfig {
+    AppConfig {
+        channels: if a.channels.is_empty() { None } else { Some(a.channels.clone()) },
+        patterns: if a.patterns.is_empty() { None } else { Some(a.patterns.clone()) },
+        providers: if a.providers.is_empty() { None } else { Some(a.providers.clone()) },
+        exclude_providers: if a.exclude_providers.is_empty() { None } else { Some(a.exclude_providers.clone()) },
+        output: Some(a.output),
+        text_format: Some(a.text_format),
+        theme: Some(a.theme),
+        max_events: Some(a.max_events),
+        include_info: Some(a.include_info),
+        no_level_filter: Some(a.no_level_filter),
+        min_level: a.min_level,
+        max_level: a.max_level,
+        scan_path: a.scan_path.clone(),
+        file_glob: a.file_glob.clone(),
+        evtx_path: a.evtx_path.clone(),
+        evtx_glob: a.evtx_glob.clone(),
+        html: a.html.clone(),
+        json_path: a.json_path.clone(),
+        csv_path: a.csv_path.clone(),
+        ndjson_path: a.ndjson_path.clone(),
+        md_path: a.md_path.clone(),
+        md_fix_path: a.md_fix_path.clone(),
+        warnings_as_errors: Some(a.warnings_as_errors),
+        progress: Some(a.progress),
+        last_errors: Some(a.last_errors),
+        last_criticals: Some(a.last_criticals),
+        hours: Some(a.hours),
+        minutes: Some(a.minutes),
+        since: a.since.clone(),
+        until: a.until.clone(),
+        summary_only: Some(a.summary_only),
+        analysis_only: Some(a.analysis_only),
+        sample_count: a.sample_count,
+        include_event_ids: if a.include_event_ids.is_empty() { None } else { Some(a.include_event_ids.clone()) },
+        exclude_event_ids: if a.exclude_event_ids.is_empty() { None } else { Some(a.exclude_event_ids.clone()) },
+        emit_eventdata: Some(a.emit_eventdata),
+        emit_xml: Some(a.emit_xml),
+        force_color: Some(a.force_color),
+        time_zone: Some(a.time_zone),
+        columns: if a.columns.is_empty() { None } else { Some(a.columns.clone()) },
+        no_truncate: Some(a.no_truncate),
+        time_format: a.time_format.clone(),
+        log_format: a.log_format,
+        log_path: a.log_path.clone(),
+        export_dir: a.export_dir.clone(),
+        preset: a.preset,
+        columns_preset: a.columns_preset,
+        export_zip: Some(a.export_zip),
+        redact: if a.redact.is_empty() { None } else { Some(a.redact.clone()) },
+        exit_code_by_risk: Some(a.exit_code_by_risk),
+    }
+}

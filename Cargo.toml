@@ -30,6 +30,7 @@ indicatif = "0.18.3"
 toml = "0.9.8"
 is-terminal = "0.4"
 wmi = "0.18"
+zip = "0.6"
 
 [profile.release]
 opt-level = 3

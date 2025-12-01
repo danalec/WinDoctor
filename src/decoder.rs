@@ -41,7 +41,15 @@ pub fn decode_event(provider: &str, event_id: u32, xml: &str) -> Option<String> 
         }
         "Schannel" => {
             let code = m.get("ErrorCode").cloned().unwrap_or_default();
-            if !code.is_empty() { return Some(format!("Schannel ErrorCode={}", code)); }
+            if !code.is_empty() {
+                let msg = match code.to_lowercase().as_str() {
+                    "0x80090308" => "Handshake failure: Invalid token",
+                    "0x8009030c" => "Handshake failure: Cannot find credentials",
+                    "0x80090325" => "Certificate chain was issued by an untrusted authority",
+                    _ => "TLS/SSL handshake error",
+                };
+                return Some(format!("Schannel {} (ErrorCode={})", msg, code));
+            }
             None
         }
         "Microsoft-Windows-WER-SystemErrorReporting" => {
@@ -59,6 +67,14 @@ pub fn decode_event(provider: &str, event_id: u32, xml: &str) -> Option<String> 
         }
         "Microsoft-Windows-Kernel-Power" => {
             if event_id == 41 { return Some("Unexpected shutdown or power loss detected".to_string()); }
+            None
+        }
+        "Microsoft-Windows-Kernel-PnP" => {
+            if event_id == 219 {
+                let dev = m.get("DeviceInstanceId").cloned().unwrap_or_default();
+                let msg = if dev.is_empty() { "Driver failed to load for a device".to_string() } else { format!("Driver failed to load for device {}", dev) };
+                return Some(msg);
+            }
             None
         }
         "EventLog" => {
@@ -93,11 +109,13 @@ pub fn decode_event(provider: &str, event_id: u32, xml: &str) -> Option<String> 
         "volmgr" => {
             let c = xml.to_lowercase();
             if c.contains("failed to flush data to the transaction log") { return Some("Volume manager flush failure – potential corruption".to_string()); }
+            if c.contains("the system failed to flush data") { return Some("System failed to flush data – potential filesystem corruption".to_string()); }
             None
         }
         "volsnap" => {
             let c = xml.to_lowercase();
             if c.contains("shadow copies of volume") && c.contains("were aborted") { return Some("Shadow copies aborted – may indicate underlying disk issues".to_string()); }
+            if c.contains("the shadow copy of volume") && c.contains("was aborted") { return Some("Shadow copy aborted – potential disk instability".to_string()); }
             None
         }
         "Microsoft-Windows-DNS-Client" => {
