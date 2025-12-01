@@ -753,7 +753,12 @@ fn main() {
         let html_path = base.join(format!("report-{}.html", ts));
         let html = crate::html::render_html(&summary, args.theme, !args.no_emoji, args.time_zone, args.time_format.as_deref());
         match std::fs::write(&html_path, html) {
-            Ok(_) => { if !args.no_open { open_file_default(html_path.clone()); } if !args.quiet { println!("{}", paint(&format!("HTML generated: {}", html_path.to_string_lossy()), "1;36")); } }
+            Ok(_) => {
+                if !args.no_open { open_file_default(html_path.clone()); }
+                if !args.quiet {
+                    println!("{}", paint(&format!("HTML generated: {}", html_path.to_string_lossy()), "1;36"));
+                }
+            }
             Err(e) => { log::error!("HTML write failed for {}: {}", html_path.to_string_lossy(), e); }
         }
         let json_path = base.join(format!("report-{}.json", ts));
@@ -1847,8 +1852,6 @@ mod tests_sampling_limits {
             None,
             Some(5),
             Some(5),
-            false,
-            0,
         );
         let sys = rep.samples.iter().filter(|e| e.channel == "System").count();
         let app = rep.samples.iter().filter(|e| e.channel == "Application").count();
@@ -1890,8 +1893,6 @@ mod tests_dedup_app_error {
             None,
             None,
             None,
-            false,
-            0,
         );
         let cnt = rep.samples.iter().filter(|e| e.provider == "Application Error" && event_message(e) == "Faulting app crash X" && event_cause(e) == "Application Error 1000").count();
         assert!(cnt <= 3);
