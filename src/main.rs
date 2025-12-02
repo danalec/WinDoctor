@@ -771,6 +771,7 @@ fn main() {
         if let Some(ev) = read_ndjson_full(path) {
             let mut items: Vec<EventItem> = Vec::new();
             for r in ev {
+                if let Some(sv) = r.schema_version { if sv != 1 { log::warn!("Skipping NDJSON record with unsupported schema_version: {}", sv); continue; } }
                 let time = parse_system_time(&r.time.unwrap_or_else(|| Utc::now().to_rfc3339())).unwrap_or(Utc::now());
                 let severity = match r.severity.as_deref() { Some("Critical")=>1, Some("Error")=>2, Some("Warning")=>3, Some("Information")=>4, _=>0 };
                 items.push(EventItem { time, level: severity, channel: r.channel.unwrap_or_else(|| "".to_string()), provider: r.provider.unwrap_or_else(|| "".to_string()), event_id: r.event_id.unwrap_or(0), content: r.message.or(r.cause).unwrap_or_default(), raw_xml: None });
